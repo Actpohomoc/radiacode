@@ -1,0 +1,18 @@
+template:
+  - trigger:
+    - platform: webhook
+      webhook_id: radiacode
+      local_only: false
+      allowed_methods:
+        - POST
+        - GET
+    sensor:
+      - name: "Radiacode dose rate"
+        state: "{{ trigger.json.dose_rate }}"
+        unit_of_measurement: "μSv/h"
+        icon: mdi:radioactive
+        attributes:
+          count_rate: "{{ trigger.json.count_rate }}"
+          dose_rate_err: "{{ trigger.json.dose_rate_err }}"
+          count_rate_err: "{{ trigger.json.count_rate_err }}"
+          charge_level: "{{ trigger.json.charge_level }}"

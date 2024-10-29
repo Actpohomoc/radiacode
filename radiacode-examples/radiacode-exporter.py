@@ -3,7 +3,7 @@ import time
 
 import prometheus_client
 
-from radiacode import CountRate, DoseRate, RadiaCode, spectrum_channel_to_energy
+from radiacode import RealTimeData, RadiaCode
 
 
 def main():
@@ -23,7 +23,9 @@ def main():
     serial = rc.serial_number()
 
     metric_count_rate = prometheus_client.Gauge('radiacode_count_rate', 'count rate, CPS', ['device']).labels(serial)
-    metric_count_rate_error = prometheus_client.Gauge('radiacode_count_rate_error', 'count rate error, %', ['device']).labels(serial)
+    metric_count_rate_error = prometheus_client.Gauge('radiacode_count_rate_error', 'count rate error, %', ['device']).labels(
+        serial
+    )
     metric_dose_rate = prometheus_client.Gauge('radiacode_dose_rate', 'dose rate, μSv/h', ['device']).labels(serial)
     metric_dose_rate_error = prometheus_client.Gauge('radiacode_dose_rate_error', 'dose rate error, %', ['device']).labels(serial)
 
@@ -31,10 +33,9 @@ def main():
 
     while True:
         for v in rc.data_buf():
-            if isinstance(v, CountRate):
+            if isinstance(v, RealTimeData):
                 metric_count_rate.set(v.count_rate)
                 metric_count_rate_error.set(v.count_rate_err)
-            elif isinstance(v, DoseRate):
                 metric_dose_rate.set(10000 * v.dose_rate)  # convert to μSv/h
                 metric_dose_rate_error.set(v.dose_rate_err)
 

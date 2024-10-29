@@ -9,23 +9,28 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
       with:
         fetch-depth: 0 # need tags to generate release notes
 
-    - name: Set up Python 3.8
-      uses: actions/setup-python@v1
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v4
       with:
-        python-version: 3.8
+        python-version: '3.10'
 
     - name: Install poetry
       run: |
-        curl -sSL https://raw.githubusercontent.com/python-poetry/poetry/master/get-poetry.py | python
+        curl -sSL https://install.python-poetry.org | python -
         echo "$HOME/.poetry/bin" >> $GITHUB_PATH
 
     - name: Install package
       run: |
         poetry install
+
+    - name: Run ruff
+      run: |
+        poetry run ruff radiacode radiacode-examples
+        poetry run ruff format --check radiacode radiacode-examples
 
     - name: Build wheel
       id: build

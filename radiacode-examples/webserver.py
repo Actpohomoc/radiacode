@@ -5,7 +5,7 @@ import pathlib
 
 from aiohttp import web
 
-from radiacode import CountRate, DoseRate, RadiaCode
+from radiacode import RadiaCode, RealTimeData
 
 
 async def handle_index(request):
@@ -16,19 +16,18 @@ async def handle_ws(request):
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     request.app.ws_clients.append(ws)
-    async for _ in ws:  # noqa: WPS328
+    async for _ in ws:
         pass
     request.app.ws_clients.remove(ws)
     return ws
 
 
 async def handle_spectrum(request):
-    spectrum = request.app.rc_conn.spectrum()
+    cn = request.app.rc_conn
+    accum = request.query.get('accum') == 'true'
+    spectrum = cn.spectrum_accum() if accum else cn.spectrum()
     # apexcharts can't handle 0 in logarithmic view
-    spectrum_data = [
-        (channel, cnt if cnt > 0 else 0.5)
-        for channel, cnt in enumerate(spectrum.counts)
-    ]
+    spectrum_data = [(channel, cnt if cnt > 0 else 0.5) for channel, cnt in enumerate(spectrum.counts)]
     print('Spectrum updated')
     return web.json_response(
         {
@@ -39,31 +38,34 @@ async def handle_spectrum(request):
     )
 
 
+async def handle_spectrum_reset(request):
+    cn = request.app.rc_conn
+    cn.spectrum_reset()
+    print('Spectrum reset')
+    return web.json_response({})
+
+
 async def process(app):
     max_history_size = 128
-    countrate_history, doserate_history = [], []
-    while True:  # noqa: WPS457
+    history = []
+    while True:
         databuf = app.rc_conn.data_buf()
         for v in databuf:
-            if isinstance(v, CountRate):
-                countrate_history.append(v)
-            elif isinstance(v, DoseRate):
-                doserate_history.append(v)
+            if isinstance(v, RealTimeData):
+                history.append(v)
 
-        countrate_history.sort(key=lambda x: x.dt)
-        countrate_history = countrate_history[-max_history_size:]
-        doserate_history.sort(key=lambda x: x.dt)
-        doserate_history = doserate_history[-max_history_size:]
+        history.sort(key=lambda x: x.dt)
+        history = history[-max_history_size:]
         jdata = json.dumps(
             {
                 'series': [
                     {
                         'name': 'countrate',
-                        'data': [(int(1000 * x.dt.timestamp()), x.count_rate) for x in countrate_history],
+                        'data': [(int(1000 * x.dt.timestamp()), x.count_rate) for x in history],
                     },
                     {
                         'name': 'doserate',
-                        'data': [(int(1000 * x.dt.timestamp()), 10000 * x.dose_rate) for x in doserate_history],
+                        'data': [(int(1000 * x.dt.timestamp()), 10000 * x.dose_rate) for x in history],
                     },
                 ],
             },
@@ -97,6 +99,7 @@ if __name__ == '__main__':
         [
             web.get('/', handle_index),
             web.get('/spectrum', handle_spectrum),
+            web.post('/spectrum/reset', handle_spectrum_reset),
             web.get('/ws', handle_ws),
         ],
     )

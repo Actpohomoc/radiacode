@@ -1,13 +1,14 @@
 import datetime
 import struct
-from typing import List, Union
+import platform
+from typing import List, Optional, Union
 
 from radiacode.bytes_buffer import BytesBuffer
 from radiacode.decoders.databuf import decode_VS_DATA_BUF
 from radiacode.decoders.spectrum import decode_RC_VS_SPECTRUM
 from radiacode.transports.bluetooth import Bluetooth
 from radiacode.transports.usb import Usb
-from radiacode.types import CTRL, VS, VSFR, CountRate, DisplayDirection, DoseRate, DoseRateDB, Event, RareData, Spectrum
+from radiacode.types import CTRL, VS, VSFR, DisplayDirection, DoseRateDB, Event, RareData, RawData, RealTimeData, Spectrum
 
 
 # channel number -> kEv
@@ -18,12 +19,21 @@ def spectrum_channel_to_energy(channel_number: int, a0: float, a1: float, a2: fl
 class RadiaCode:
     _connection: Union[Bluetooth, Usb]
 
-    def __init__(self, bluetooth_mac: str = None):
+    def __init__(
+        self,
+        bluetooth_mac: Optional[str] = None,
+        serial_number: Optional[str] = None,
+        ignore_firmware_compatibility_check: bool = False,
+    ):
         self._seq = 0
-        if bluetooth_mac is not None:
+
+        # Bluepy doesn't support MacOS: https://github.com/IanHarvey/bluepy/issues/44
+        self._bt_supported = platform.system() != 'Darwin'
+
+        if bluetooth_mac is not None and self._bt_supported is True:
             self._connection = Bluetooth(bluetooth_mac)
         else:
-            self._connection = Usb()
+            self._connection = Usb(serial_number=serial_number)
 
         # init
         self.execute(b'\x07\x00', b'\x01\xff\x12\xff')
@@ -31,10 +41,22 @@ class RadiaCode:
         self.set_local_time(self._base_time)
         self.device_time(0)
 
+        (_, (vmaj, vmin, _)) = self.fw_version()
+        if ignore_firmware_compatibility_check is False and vmaj < 4 or (vmaj == 4 and vmin < 8):
+            raise Exception(
+                f'Incompatible firmware version {vmaj}.{vmin}, >=4.8 required. Upgrade device firmware or use radiacode==0.2.2'
+            )
+
+        self._spectrum_format_version = 0
+        for line in self.configuration().split('\n'):
+            if line.startswith('SpecFormatVersion'):
+                self._spectrum_format_version = int(line.split('=')[1])
+                break
+
     def base_time(self) -> datetime.datetime:
         return self._base_time
 
-    def execute(self, reqtype: bytes, args: bytes = None) -> BytesBuffer:
+    def execute(self, reqtype: bytes, args: Optional[bytes] = None) -> BytesBuffer:
         assert len(reqtype) == 2
         req_seq_no = 0x80 + self._seq
         self._seq = (self._seq + 1) % 32
@@ -51,11 +73,15 @@ class RadiaCode:
     def read_request(self, command_id: Union[int, VS, VSFR]) -> BytesBuffer:
         r = self.execute(b'\x26\x08', struct.pack('<I', int(command_id)))
         retcode, flen = r.unpack('<II')
-        assert retcode == 1
-        assert r.size() == flen
+        assert retcode == 1, f'{command_id}: got retcode {retcode}'
+        # HACK: workaround for new firmware bug(?)
+        if r.size() == flen + 1 and r._data[-1] == 0x00:
+            r._data = r._data[:-1]
+        # END OF HACK
+        assert r.size() == flen, f'{command_id}: got size {r.size()}, expect {flen}'
         return r
 
-    def write_request(self, command_id: Union[int, VSFR], data: bytes) -> None:
+    def write_request(self, command_id: Union[int, VSFR], data: Optional[bytes] = None) -> None:
         r = self.execute(b'\x25\x08', struct.pack('<I', int(command_id)) + (data or b''))
         retcode = r.unpack('<I')[0]
         assert retcode == 1
@@ -64,7 +90,7 @@ class RadiaCode:
     def batch_read_vsfrs(self, vsfr_ids: List[VSFR]) -> List[int]:
         assert len(vsfr_ids)
         r = self.execute(b'\x2a\x08', b''.join(struct.pack('<I', int(c)) for c in vsfr_ids))
-        ret = [r.unpack('<I')[0] for _ in enumerate(vsfr_ids)]
+        ret = [r.unpack('<I')[0] for _ in range(len(vsfr_ids))]
         assert r.size() == 0
         return ret
 
@@ -72,7 +98,7 @@ class RadiaCode:
         r = self.execute(b'\x05\x00')
         flags = r.unpack('<I')
         assert r.size() == 0
-        return f'statuc flags: {flags}'
+        return f'status flags: {flags}'
 
     def set_local_time(self, dt: datetime.datetime) -> None:
         d = struct.pack('<BBBBBBBB', dt.day, dt.month, dt.year - 2000, 0, dt.second, dt.minute, dt.hour, 0)
@@ -85,14 +111,14 @@ class RadiaCode:
         idstring = r.unpack_string()
         return f'Signature: {signature:08X}, FileName="{filename}", IdString="{idstring}"'
 
-    def fw_version(self) -> str:
+    def fw_version(self) -> tuple[tuple[int, int, str], tuple[int, int, str]]:
         r = self.execute(b'\x0a\x00')
-        boot_v0, boot_v1 = r.unpack('<HH')
+        boot_minor, boot_major = r.unpack('<HH')
         boot_date = r.unpack_string()
-        target_v0, target_v1 = r.unpack('<HH')
+        target_minor, target_major = r.unpack('<HH')
         target_date = r.unpack_string()
         assert r.size() == 0
-        return f'Boot version: {boot_v1}.{boot_v0} {boot_date} | Target version: {target_v1}.{target_v0} {target_date}'
+        return ((boot_major, boot_minor, boot_date), (target_major, target_minor, target_date.strip('\x00')))
 
     def hw_serial_number(self) -> str:
         r = self.execute(b'\x0b\x00')
@@ -106,6 +132,10 @@ class RadiaCode:
         r = self.read_request(VS.CONFIGURATION)
         return r.data().decode('cp1251')
 
+    def text_message(self) -> str:
+        r = self.read_request(VS.TEXT_MESSAGE)
+        return r.data().decode('ascii')
+
     def serial_number(self) -> str:
         r = self.read_request(8)
         return r.data().decode('ascii')
@@ -118,18 +148,38 @@ class RadiaCode:
     def device_time(self, v: int) -> None:
         self.write_request(VSFR.DEVICE_TIME, struct.pack('<I', v))
 
-    def data_buf(self) -> List[Union[CountRate, DoseRate, DoseRateDB, RareData, Event]]:
+    def data_buf(self) -> List[Union[DoseRateDB, RareData, RealTimeData, RawData, Event]]:
         r = self.read_request(VS.DATA_BUF)
         return decode_VS_DATA_BUF(r, self._base_time)
 
     def spectrum(self) -> Spectrum:
         r = self.read_request(VS.SPECTRUM)
-        return decode_RC_VS_SPECTRUM(r)
+        return decode_RC_VS_SPECTRUM(r, self._spectrum_format_version)
+
+    def spectrum_accum(self) -> Spectrum:
+        r = self.read_request(VS.SPEC_ACCUM)
+        return decode_RC_VS_SPECTRUM(r, self._spectrum_format_version)
+
+    def dose_reset(self) -> None:
+        self.write_request(VSFR.DOSE_RESET)
+
+    def spectrum_reset(self) -> None:
+        r = self.execute(b'\x27\x08', struct.pack('<II', int(VS.SPECTRUM), 0))
+        retcode = r.unpack('<I')[0]
+        assert retcode == 1
+        assert r.size() == 0
 
     # used in spectrum_channel_to_energy
     def energy_calib(self) -> List[float]:
         r = self.read_request(VS.ENERGY_CALIB)
         return list(r.unpack('<fff'))
+
+    def set_energy_calib(self, coef: List[float]) -> None:
+        assert len(coef) == 3
+        pc = struct.pack('<fff', *coef)
+        r = self.execute(b'\x27\x08', struct.pack('<II', int(VS.ENERGY_CALIB), len(pc)) + pc)
+        retcode = r.unpack('<I')[0]
+        assert retcode == 1
 
     def set_language(self, lang='ru') -> None:
         assert lang in {'ru', 'en'}, 'unsupported lang value - use "ru" or "en"'
@@ -157,12 +207,12 @@ class RadiaCode:
         self.write_request(VSFR.DISP_OFF_TIME, struct.pack('<I', v))
 
     def set_display_brightness(self, brightness: int) -> None:
-        assert 0 <= brightness and brightness <= 9  # noqa: WPS309, WPS333
+        assert 0 <= brightness and brightness <= 9
         self.write_request(VSFR.DISP_BRT, struct.pack('<I', brightness))
 
     def set_display_direction(self, direction: DisplayDirection) -> None:
         assert isinstance(direction, DisplayDirection)
-        self.write_request(VSFR.DISP_DR, struct.pack('<I', int(direction)))
+        self.write_request(VSFR.DISP_DIR, struct.pack('<I', int(direction)))
 
     def set_vibro_ctrl(self, ctrls: List[CTRL]) -> None:
         flags = 0

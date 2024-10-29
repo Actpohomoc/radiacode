@@ -5,19 +5,21 @@ from typing import List
 
 
 @dataclass
-class CountRate:
+class RealTimeData:
     dt: datetime.datetime
     count_rate: float
     count_rate_err: float  # %
-    flags: int
-
-
-@dataclass
-class DoseRate:
-    dt: datetime.datetime
     dose_rate: int
     dose_rate_err: int
     flags: int
+    real_time_flags: int
+
+
+@dataclass
+class RawData:
+    dt: datetime.datetime
+    count_rate: float
+    dose_rate: float
 
 
 @dataclass
@@ -76,7 +78,7 @@ class VSFR(Enum):
     DISP_CONTR = 1298
     DISP_OFF_TIME = 1299
     DISP_ON = 1300
-    DISP_DR = 1301
+    DISP_DIR = 1301
     SOUND_CTRL = 1312
     SOUND_VOL = 1313
     SOUND_ON = 1314
@@ -95,6 +97,7 @@ class VSFR(Enum):
     MS_MODE = 1537
     MS_SUB_MODE = 1538
     MS_RUN = 1539
+    DOSE_RESET = 32775
 
     def __int__(self) -> int:
         return self.value
@@ -102,9 +105,15 @@ class VSFR(Enum):
 
 class VS(Enum):
     CONFIGURATION = 2
+    TEXT_MESSAGE = 15
     DATA_BUF = 256
     SPECTRUM = 512
     ENERGY_CALIB = 514
+    SPEC_ACCUM = 517
+    SPEC_DIFF = 518  # TODO: what's that? Can be decoded by spectrum decoder
+    SPEC_RESET = 519  # TODO: looks like spectrum, but our spectrum decoder fails with `vlen == 7 unsupported`
+    # UNKNOWN_13 = 13
+    # UNKNOWN_240 = 240
 
     def __int__(self) -> int:
         return self.value
